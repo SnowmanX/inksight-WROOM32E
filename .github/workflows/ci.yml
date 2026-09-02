@@ -1,6 +1,7 @@
 name: CI
 
 on:
+  workflow_dispatch:    # ← 必须要这一行！
   push:
     branches: [main]
   pull_request:
