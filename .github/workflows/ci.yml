@@ -99,3 +99,11 @@ jobs:
         run: pio run -e ${{ matrix.env }}
         working-directory: firmware
 
+      - name: Upload firmware artifacts    # ← 加这段
+        uses: actions/upload-artifact@v4
+        with:
+          name: firmware-${{ matrix.env }}
+          path: |
+            firmware/.pio/build/${{ matrix.env }}/*.bin
+            firmware/.pio/build/${{ matrix.env }}/*.elf
+          if-no-files-found: error
