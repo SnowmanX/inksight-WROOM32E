@@ -140,11 +140,22 @@ def ota_stream(
     sock: socket.socket,
     bin_path: str,
     *,
-    chunk_size: int = 1024,
+    chunk_size: int = 256,
+    inter_chunk_delay: float = 0.05,
+    progress_callback: Optional[Callable[[dict], None]] = None,
 ) -> str:
-    """v28: 仿 Cloud_WIN ota(). 流程: G/ → C/ → N/ → O/ → 1024-byte chunks → 0x31 结束.
+    """v29: 仿 Cloud_WIN ota() 流程 + 实时进度回调.
 
-    Returns a one-line protocol trace for logging.
+    流程: G/ → C/ → N/ → O/ → chunks → 0x31 结束.
+    改进 (vs v28):
+      - chunk_size 默认 256 字节 (was 1024), 给设备 flash 写入留时间
+      - 每个 chunk 后 sleep 50ms, 避免 TCP buffer 溢出 / 设备断连
+      - 每个 chunk 调 progress_callback 让 webapp 显示实时百分比
+
+    progress_callback 收到的 dict:
+      {"phase": "handshake"|"ota_entry"|"pushing"|"finishing"|"done"|"error",
+       "bytes_sent": int, "bytes_total": int, "chunks_done": int, "chunks_total": int,
+       "percent": float, "ts": float}
     """
     if not os.path.exists(bin_path):
         raise FileNotFoundError(f"ota bin not found: {bin_path}")
@@ -152,6 +163,24 @@ def ota_stream(
     if fsize == 0:
         raise ValueError(f"ota bin is empty: {bin_path}")
     log = []
+    t_start = time.time()
+
+    def _report(phase: str, **kw) -> None:
+        if progress_callback:
+            try:
+                progress_callback({
+                    "phase": phase,
+                    "bytes_sent": kw.get("bytes_sent", 0),
+                    "bytes_total": fsize,
+                    "chunks_done": kw.get("chunks_done", 0),
+                    "chunks_total": n_chunks if "n_chunks" in dir() else 0,
+                    "percent": round(100 * kw.get("bytes_sent", 0) / max(fsize, 1), 1),
+                    "ts": time.time(),
+                })
+            except Exception as cb_err:  # noqa: BLE001
+                logger.warning("[ota] progress_callback err: %s", cb_err)
+
+    _report("handshake", bytes_sent=0)
 
     # 1) 复用标准握手
     sock.sendall(build_cmd("G"))
@@ -162,14 +191,16 @@ def ota_stream(
     log.append(f"N/={_read_drain(sock, 3.0)!r}")
 
     # 2) ;O/ 进 OTA 模式
-    # 设备 ACK = 1 字节 cs（XOR of 'O' = 0x4F）
     ack = _safe_send_ota(sock, build_cmd("O"), bytes([0x4F]), timeout=5.0)
     log.append(f"O/={ack!r}")
     if "err" in ack or ack == "<timeout>" or ack == "<no-ack>":
+        _report("error")
         raise RuntimeError(f"device rejected OTA entry (ack={ack!r})")
+    _report("ota_entry", bytes_sent=0)
 
-    # 3) 流式推 .bin (1024 字节/帧, 最后一帧可能 < 1024)
-    logger.info("[ota] %s starting push: fsize=%d chunk_size=%d", bin_path, fsize, chunk_size)
+    # 3) 流式推 .bin (默认 256 字节/帧, 慢速)
+    logger.info("[ota] %s starting push: fsize=%d chunk_size=%d delay=%.3fs",
+                bin_path, fsize, chunk_size, inter_chunk_delay)
     n_chunks = math.ceil(fsize / chunk_size)
     sent = 0
     with open(bin_path, "rb") as f:
@@ -177,20 +208,31 @@ def ota_stream(
             c = f.read(chunk_size)
             if not c:
                 break
-            sock.sendall(c)
+            try:
+                sock.sendall(c)
+            except OSError as e:
+                _report("error", bytes_sent=sent, chunks_done=i)
+                raise RuntimeError(f"socket send failed at chunk {i + 1}/{n_chunks} (sent {sent}/{fsize} B): {e}")
             sent += len(c)
-            if (i + 1) % 32 == 0 or (i + 1) == n_chunks:
-                logger.info("[ota] progress: %d / %d chunks (%.1f%%)", i + 1, n_chunks, 100 * sent / fsize)
+            if (i + 1) % 64 == 0 or (i + 1) == n_chunks:
+                logger.info("[ota] progress: %d / %d chunks, %d / %d bytes (%.1f%%)",
+                            i + 1, n_chunks, sent, fsize, 100 * sent / fsize)
+                _report("pushing", bytes_sent=sent, chunks_done=i + 1)
+            if inter_chunk_delay > 0:
+                time.sleep(inter_chunk_delay)
     log.append(f"chunks={n_chunks} sent={sent}/{fsize}")
 
     # 4) 0x31 结束标志
+    _report("finishing", bytes_sent=sent, chunks_done=n_chunks)
     sock.sendall(b"1")
     log.append("end=0x31 sent")
 
     # 5) 等设备 reboot 完
     time.sleep(2.0)
     log.append("sleep 2s done")
+    _report("done", bytes_sent=sent, chunks_done=n_chunks)
 
+    logger.info("[ota] DONE: %d bytes in %.1fs", sent, time.time() - t_start)
     return " | ".join(log)
 
 
@@ -203,6 +245,7 @@ def handle_one_connection(
     image_provider: Callable[[], bytes],
     *,
     ota_provider: Optional[Callable[[], Optional[str]]] = None,
+    ota_progress_provider: Optional[Callable[[Callable[[dict], None]], None]] = None,
 ) -> None:
     peer = f"{addr[0]}:{addr[1]}"
     logger.info("[passive] device connected: %s", peer)
@@ -212,8 +255,13 @@ def handle_one_connection(
         ota_path = ota_provider() if ota_provider else None
         if ota_path:
             logger.info("[passive] OTA mode activated for %s -> %s", peer, ota_path)
-            result = ota_stream(sock, ota_path)
-            logger.info("[passive v28 OTA] %s DONE: %s", peer, result)
+            # 让 bridge 注入 progress 回调 (写到共享状态供 webapp 轮询)
+            _cb = None
+            if ota_progress_provider:
+                def _cb(d: dict) -> None:
+                    ota_progress_provider(d)
+            result = ota_stream(sock, ota_path, progress_callback=_cb)
+            logger.info("[passive v29 OTA] %s DONE: %s", peer, result)
             return
 
         try:
@@ -244,6 +292,7 @@ def start_passive_server(
     *,
     stop_event: Optional[threading.Event] = None,
     ota_provider: Optional[Callable[[], Optional[str]]] = None,
+    ota_progress_provider: Optional[Callable[[Callable[[dict], None]], None]] = None,
 ) -> threading.Thread:
     def _serve() -> None:
         srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -251,7 +300,7 @@ def start_passive_server(
         srv.bind((host, port))
         srv.listen(5)
         srv.settimeout(1.0)
-        logger.info("[passive v28] listening on %s:%d", host, port)
+        logger.info("[passive v29] listening on %s:%d", host, port)
         try:
             while not (stop_event and stop_event.is_set()):
                 try:
@@ -261,14 +310,14 @@ def start_passive_server(
                 t = threading.Thread(
                     target=handle_one_connection,
                     args=(conn, addr, image_provider),
-                    kwargs={"ota_provider": ota_provider},
+                    kwargs={"ota_provider": ota_provider, "ota_progress_provider": ota_progress_provider},
                     daemon=True,
                 )
                 t.start()
         finally:
             srv.close()
-            logger.info("[passive v28] server closed")
+            logger.info("[passive v29] server closed")
 
-    th = threading.Thread(target=_serve, daemon=True, name="waveshare-passive-v28")
+    th = threading.Thread(target=_serve, daemon=True, name="waveshare-passive-v29")
     th.start()
     return th

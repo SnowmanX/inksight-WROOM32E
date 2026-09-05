@@ -381,6 +381,16 @@ class Bridge:
         self.ota_armed: bool = False
         self.ota_path: Optional[str] = None
         self.ota_history: list[dict] = []
+        # OTA 实时进度 (供 webapp 5s 轮询 /ota/progress)
+        self.ota_progress: dict = {
+            "phase": "idle",   # idle | armed | handshake | ota_entry | pushing | finishing | done | error | cancelled
+            "bytes_sent": 0,
+            "bytes_total": 0,
+            "chunks_done": 0,
+            "chunks_total": 0,
+            "percent": 0.0,
+            "ts": 0.0,
+        }
 
     def push_frame(self, frame_bytes: bytes) -> str:
         return self.device.push_image_and_refresh(frame_bytes)
@@ -459,8 +469,26 @@ def make_app(device: WaveshareDevice) -> FastAPI:
                 p = bridge.ota_path
                 bridge.ota_armed = False
                 bridge.ota_path = None
+                # 重置 progress, 标记开始
+                try:
+                    bridge.ota_progress = {
+                        "phase": "handshake",
+                        "bytes_sent": 0,
+                        "bytes_total": os.path.getsize(p),
+                        "chunks_done": 0,
+                        "chunks_total": 0,
+                        "percent": 0.0,
+                        "ts": time.time(),
+                    }
+                except OSError:
+                    pass
                 return p
             return None
+
+        # ota_stream v29 期望 progress_callback: Callable[[dict], None]
+        # bridge 端把 progress 写到 bridge.ota_progress 共享状态供 webapp 轮询
+        def _ota_progress_writer(d: dict) -> None:
+            bridge.ota_progress.update(d)
 
         start_passive_server(
             host="0.0.0.0",
@@ -468,6 +496,7 @@ def make_app(device: WaveshareDevice) -> FastAPI:
             image_provider=lambda: bridge.latest_bw or b"\xff" * WAVESHARE_42_FRAME_BYTES,
             stop_event=stop_event,
             ota_provider=_ota_provider,
+            ota_progress_provider=_ota_progress_writer,  # 直接是 Callable[[dict], None]
         )
         logger.info("passive server started on 0.0.0.0:%d", device.port)
         try:
@@ -636,6 +665,7 @@ def make_app(device: WaveshareDevice) -> FastAPI:
             "path": bridge.ota_path,
             "history": bridge.ota_history[-5:],  # 最近 5 次
             "default_bin": Bridge.DEFAULT_OTA_BIN,
+            "progress": dict(bridge.ota_progress),  # 当前进度 (兼容)
         }
 
     @app.post("/ota/arm")
@@ -654,6 +684,16 @@ def make_app(device: WaveshareDevice) -> FastAPI:
 
         bridge.ota_path = path
         bridge.ota_armed = True
+        # 把 progress 标记为 armed, 让 webapp 显示橙色等待
+        bridge.ota_progress = {
+            "phase": "armed",
+            "bytes_sent": 0,
+            "bytes_total": fsize,
+            "chunks_done": 0,
+            "chunks_total": 0,
+            "percent": 0.0,
+            "ts": time.time(),
+        }
         logger.warning("[ota] ARMED path=%s size=%d. 设备下次连入就会触发推 .bin, 不可撤销.", path, fsize)
         return {
             "ok": True,
@@ -668,8 +708,30 @@ def make_app(device: WaveshareDevice) -> FastAPI:
         """取消武装的 OTA. 必须在上次 /ota/arm 之后、还没设备连入之前调用."""
         bridge.ota_armed = False
         bridge.ota_path = None
+        # 把 phase 标记为 cancelled (如果之前是 armed/idle)
+        if bridge.ota_progress.get("phase") not in ("done", "error"):
+            bridge.ota_progress["phase"] = "cancelled"
         logger.info("[ota] cancelled")
         return {"ok": True, "armed": False}
+
+    @app.get("/ota/progress")
+    async def ota_progress():
+        """OTA 实时进度 (webapp 5s 轮询).
+
+        Returns:
+          phase: idle | armed | handshake | ota_entry | pushing | finishing | done | error | cancelled
+          bytes_sent / bytes_total
+          chunks_done / chunks_total
+          percent: 0-100
+          ts: 时间戳
+        """
+        p = dict(bridge.ota_progress)  # copy, 防 webapp 读到半更新状态
+        # 加上 arms 状态, 方便 webapp 一次拿全
+        p["armed"] = bridge.ota_armed
+        p["path"] = bridge.ota_path
+        # 距上次更新的秒数 (webapp 用来判断进度是否停滞)
+        p["age_s"] = round(time.time() - p.get("ts", 0), 1) if p.get("ts") else None
+        return p
 
     return app
 

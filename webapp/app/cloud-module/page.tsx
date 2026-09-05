@@ -36,6 +36,16 @@ export default function CloudModulePage() {
     history: { ts?: number; result?: string; error?: string }[];
     default_bin: string;
   } | null>(null);
+  const [otaProgress, setOtaProgress] = useState<{
+    phase: string;
+    bytes_sent: number;
+    bytes_total: number;
+    chunks_done: number;
+    chunks_total: number;
+    percent: number;
+    ts: number;
+    age_s?: number | null;
+  } | null>(null);
   const [otaBusy, setOtaBusy] = useState(false);
 
   const appendLog = useCallback((line: string) => {
@@ -76,16 +86,28 @@ export default function CloudModulePage() {
     }
   }, []);
 
+  const refreshOtaProgress = useCallback(async () => {
+    try {
+      const r = await fetch("/api/cloud-module/ota/progress", { cache: "no-store" });
+      const d = await r.json();
+      setOtaProgress(d);
+    } catch {
+      /* keep last */
+    }
+  }, []);
+
   useEffect(() => {
     refreshModes();
     refreshStatus();
     refreshOta();
+    refreshOtaProgress();
     const t = setInterval(() => {
       refreshStatus();
       refreshOta();
+      refreshOtaProgress();
     }, 5000);
     return () => clearInterval(t);
-  }, [refreshModes, refreshStatus, refreshOta]);
+  }, [refreshModes, refreshStatus, refreshOta, refreshOtaProgress]);
 
   const doPreview = useCallback(async () => {
     if (!selected) return;
@@ -329,6 +351,57 @@ export default function CloudModulePage() {
             <div>
               默认固件: <span className="font-mono text-ink/80">{otaState?.default_bin || "..."}</span>
             </div>
+            <div className="flex items-center gap-2 pt-1">
+              <span>当前阶段:</span>
+              <span className={`inline-flex items-center gap-1 rounded-sm px-2 py-0.5 text-[10px] font-semibold font-mono ${
+                otaProgress?.phase === "pushing" || otaProgress?.phase === "ota_entry"
+                  ? "bg-amber-100 text-amber-800"
+                  : otaProgress?.phase === "done"
+                  ? "bg-green-100 text-green-800"
+                  : otaProgress?.phase === "error"
+                  ? "bg-red-100 text-red-800"
+                  : otaProgress?.phase === "cancelled"
+                  ? "bg-gray-100 text-gray-700"
+                  : otaProgress?.phase === "armed"
+                  ? "bg-orange-100 text-orange-800"
+                  : "bg-ink/5 text-ink-light"
+              }`}>
+                {otaProgress?.phase || "idle"}
+              </span>
+              {otaProgress?.ts ? (
+                <span className="text-[10px] text-ink-light">
+                  (更新于 {new Date(otaProgress.ts * 1000).toLocaleTimeString()}
+                  {otaProgress.age_s != null ? `, ${otaProgress.age_s}s ago` : ""})
+                </span>
+              ) : null}
+            </div>
+            {otaProgress && otaProgress.bytes_total > 0 && (
+              <div className="pt-2 space-y-1">
+                <div className="flex justify-between text-[10px]">
+                  <span>
+                    {otaProgress.bytes_sent.toLocaleString()} / {otaProgress.bytes_total.toLocaleString()} B
+                    {otaProgress.chunks_total > 0 && (
+                      <> · {otaProgress.chunks_done} / {otaProgress.chunks_total} chunks</>
+                    )}
+                  </span>
+                  <span className="font-mono font-semibold text-ink/80">
+                    {otaProgress.percent.toFixed(1)}%
+                  </span>
+                </div>
+                <div className="h-2 w-full bg-ink/5 rounded-sm overflow-hidden">
+                  <div
+                    className={`h-full transition-all ${
+                      otaProgress.phase === "error"
+                        ? "bg-red-500"
+                        : otaProgress.phase === "done"
+                        ? "bg-green-500"
+                        : "bg-amber-500"
+                    }`}
+                    style={{ width: `${Math.max(0, Math.min(100, otaProgress.percent))}%` }}
+                  />
+                </div>
+              </div>
+            )}
             {otaState?.armed && (
               <div className="text-red-700">
                 等待设备连入: <span className="font-mono">{otaState.path}</span>
@@ -370,6 +443,7 @@ export default function CloudModulePage() {
           <p className="text-[10px] text-ink-light leading-relaxed">
             ⚠️ 固件刷写会通过微雪私有协议 <code>;O/</code> 推送 <code>firmware_merged.bin</code>。
             刷写期间不要断电/关电脑。失败/中断 = 设备变砖, 需用 USB-TTL + esptool 救砖。
+            进度条每 5 秒自动刷新, 显示当前 chunk / 总 chunk / 字节数。
           </p>
         </CardContent>
       </Card>
