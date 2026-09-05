@@ -370,12 +370,17 @@ def _fallback_render(persona: str, w: int, h: int) -> bytes:
 
 class Bridge:
     DEFAULT_PERSONA = "DAILY"  # 用最简单、不依赖外部翻译/数据库的模式
+    DEFAULT_OTA_BIN = r"d:\Hardware\esp32\cloudModule\firmware_merged.bin"
 
     def __init__(self, device: WaveshareDevice):
         self.device = device
         self.last_push: Optional[dict] = None
         self.latest_bw: Optional[bytes] = None
         self.latest_persona: Optional[str] = None
+        # OTA 状态: armed=True 时, 设备下次连入就推 .bin
+        self.ota_armed: bool = False
+        self.ota_path: Optional[str] = None
+        self.ota_history: list[dict] = []
 
     def push_frame(self, frame_bytes: bytes) -> str:
         return self.device.push_image_and_refresh(frame_bytes)
@@ -447,11 +452,22 @@ def make_app(device: WaveshareDevice) -> FastAPI:
         import threading
 
         stop_event = threading.Event()
+
+        def _ota_provider() -> Optional[str]:
+            if bridge.ota_armed and bridge.ota_path:
+                # 一次性: 取出后立即 disarm, 防止下次连接再推
+                p = bridge.ota_path
+                bridge.ota_armed = False
+                bridge.ota_path = None
+                return p
+            return None
+
         start_passive_server(
             host="0.0.0.0",
             port=device.port,
             image_provider=lambda: bridge.latest_bw or b"\xff" * WAVESHARE_42_FRAME_BYTES,
             stop_event=stop_event,
+            ota_provider=_ota_provider,
         )
         logger.info("passive server started on 0.0.0.0:%d", device.port)
         try:
@@ -609,6 +625,51 @@ def make_app(device: WaveshareDevice) -> FastAPI:
                 results.append({"persona": p, "index": i, "ok": False, "error": str(e)})
                 logger.exception("[push_all] %d/%d %s failed", i, len(personas), p)
         return {"total": len(personas), "results": results}
+
+    # ==================== OTA 升级 ====================
+
+    @app.get("/ota/status")
+    async def ota_status():
+        """当前 OTA 状态. armed=True 表示设备下次连入就开始推 .bin."""
+        return {
+            "armed": bridge.ota_armed,
+            "path": bridge.ota_path,
+            "history": bridge.ota_history[-5:],  # 最近 5 次
+            "default_bin": Bridge.DEFAULT_OTA_BIN,
+        }
+
+    @app.post("/ota/arm")
+    async def ota_arm(payload: Optional[dict] = None):
+        """武装 OTA: 设备下次连入时, 推 .bin.
+
+        payload: {"path": "D:\\\\...\\\\firmware_merged.bin"}  (可选, 默认用 Bridge.DEFAULT_OTA_BIN)
+        """
+        path = (payload or {}).get("path") or Bridge.DEFAULT_OTA_BIN
+        path = os.path.normpath(path)
+        if not os.path.exists(path):
+            raise HTTPException(404, f"ota bin not found: {path}")
+        fsize = os.path.getsize(path)
+        if fsize == 0:
+            raise HTTPException(400, f"ota bin is empty: {path}")
+
+        bridge.ota_path = path
+        bridge.ota_armed = True
+        logger.warning("[ota] ARMED path=%s size=%d. 设备下次连入就会触发推 .bin, 不可撤销.", path, fsize)
+        return {
+            "ok": True,
+            "armed": True,
+            "path": path,
+            "size": fsize,
+            "warning": "设备下次连入就会开始刷写. 失败/中断会导致设备变砖.",
+        }
+
+    @app.post("/ota/cancel")
+    async def ota_cancel():
+        """取消武装的 OTA. 必须在上次 /ota/arm 之后、还没设备连入之前调用."""
+        bridge.ota_armed = False
+        bridge.ota_path = None
+        logger.info("[ota] cancelled")
+        return {"ok": True, "armed": False}
 
     return app
 

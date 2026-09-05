@@ -6,11 +6,14 @@ Waveshare 4.2" e-Paper Cloud Module 被动监听模式（Server Mode）。
 - F/ 后 sleep 0.1s
 - D/ 后 sleep 5s 等墨水屏全刷
 - 设备默认密码 123456
+- O/ 为 OTA 升级模式（推 .bin 后 0x31 结束）
 """
 
 from __future__ import annotations
 
 import logging
+import math
+import os
 import socket
 import threading
 import time
@@ -114,15 +117,105 @@ def push_image_v23(sock: socket.socket, image_bytes: bytes, password: str = DEFA
     return push_image(sock, image_bytes, password)
 
 
+# ==================== OTA 模式 ====================
+
+# 云端用这个简化版的 safe_send: 设备不回 cs 字节, 但我们不阻塞, 1.5s 内放弃
+# 官方版是 while True + sleep(1) 重发, 我们用超时控制, 设备如果没回应就报错
+def _safe_send_ota(sock: socket.socket, payload: bytes, expected_ack: bytes, timeout: float = 5.0) -> str:
+    """Send once, wait for expected_ack echo. Returns the actual ack bytes received."""
+    sock.settimeout(timeout)
+    try:
+        sock.sendall(payload)
+        chunk = sock.recv(64)
+        if not chunk:
+            return "<no-ack>"
+        return chunk.hex()
+    except socket.timeout:
+        return "<timeout>"
+    except Exception as e:
+        return f"<err:{e}>"
+
+
+def ota_stream(
+    sock: socket.socket,
+    bin_path: str,
+    *,
+    chunk_size: int = 1024,
+) -> str:
+    """v28: 仿 Cloud_WIN ota(). 流程: G/ → C/ → N/ → O/ → 1024-byte chunks → 0x31 结束.
+
+    Returns a one-line protocol trace for logging.
+    """
+    if not os.path.exists(bin_path):
+        raise FileNotFoundError(f"ota bin not found: {bin_path}")
+    fsize = os.path.getsize(bin_path)
+    if fsize == 0:
+        raise ValueError(f"ota bin is empty: {bin_path}")
+    log = []
+
+    # 1) 复用标准握手
+    sock.sendall(build_cmd("G"))
+    log.append(f"G/={_read_drain(sock, 3.0)!r}")
+    sock.sendall(build_cmd("C"))
+    log.append(f"C/={_read_drain(sock, 3.0)!r}")
+    sock.sendall(build_cmd("N", DEFAULT_PASSWORD.encode("ascii")))
+    log.append(f"N/={_read_drain(sock, 3.0)!r}")
+
+    # 2) ;O/ 进 OTA 模式
+    # 设备 ACK = 1 字节 cs（XOR of 'O' = 0x4F）
+    ack = _safe_send_ota(sock, build_cmd("O"), bytes([0x4F]), timeout=5.0)
+    log.append(f"O/={ack!r}")
+    if "err" in ack or ack == "<timeout>" or ack == "<no-ack>":
+        raise RuntimeError(f"device rejected OTA entry (ack={ack!r})")
+
+    # 3) 流式推 .bin (1024 字节/帧, 最后一帧可能 < 1024)
+    logger.info("[ota] %s starting push: fsize=%d chunk_size=%d", bin_path, fsize, chunk_size)
+    n_chunks = math.ceil(fsize / chunk_size)
+    sent = 0
+    with open(bin_path, "rb") as f:
+        for i in range(n_chunks):
+            c = f.read(chunk_size)
+            if not c:
+                break
+            sock.sendall(c)
+            sent += len(c)
+            if (i + 1) % 32 == 0 or (i + 1) == n_chunks:
+                logger.info("[ota] progress: %d / %d chunks (%.1f%%)", i + 1, n_chunks, 100 * sent / fsize)
+    log.append(f"chunks={n_chunks} sent={sent}/{fsize}")
+
+    # 4) 0x31 结束标志
+    sock.sendall(b"1")
+    log.append("end=0x31 sent")
+
+    # 5) 等设备 reboot 完
+    time.sleep(2.0)
+    log.append("sleep 2s done")
+
+    return " | ".join(log)
+
+
+# ==================== Connection handler ====================
+
+
 def handle_one_connection(
     sock: socket.socket,
     addr: tuple,
     image_provider: Callable[[], bytes],
+    *,
+    ota_provider: Optional[Callable[[], Optional[str]]] = None,
 ) -> None:
     peer = f"{addr[0]}:{addr[1]}"
     logger.info("[passive] device connected: %s", peer)
     sock.settimeout(15.0)
     try:
+        # 检查本次连接是否要走 OTA
+        ota_path = ota_provider() if ota_provider else None
+        if ota_path:
+            logger.info("[passive] OTA mode activated for %s -> %s", peer, ota_path)
+            result = ota_stream(sock, ota_path)
+            logger.info("[passive v28 OTA] %s DONE: %s", peer, result)
+            return
+
         try:
             bw = image_provider()
             if not bw or len(bw) != WAVESHARE_42_FRAME_BYTES:
@@ -150,6 +243,7 @@ def start_passive_server(
     image_provider: Callable[[], bytes],
     *,
     stop_event: Optional[threading.Event] = None,
+    ota_provider: Optional[Callable[[], Optional[str]]] = None,
 ) -> threading.Thread:
     def _serve() -> None:
         srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -157,7 +251,7 @@ def start_passive_server(
         srv.bind((host, port))
         srv.listen(5)
         srv.settimeout(1.0)
-        logger.info("[passive v27] listening on %s:%d", host, port)
+        logger.info("[passive v28] listening on %s:%d", host, port)
         try:
             while not (stop_event and stop_event.is_set()):
                 try:
@@ -167,13 +261,14 @@ def start_passive_server(
                 t = threading.Thread(
                     target=handle_one_connection,
                     args=(conn, addr, image_provider),
+                    kwargs={"ota_provider": ota_provider},
                     daemon=True,
                 )
                 t.start()
         finally:
             srv.close()
-            logger.info("[passive v27] server closed")
+            logger.info("[passive v28] server closed")
 
-    th = threading.Thread(target=_serve, daemon=True, name="waveshare-passive-v27")
+    th = threading.Thread(target=_serve, daemon=True, name="waveshare-passive-v28")
     th.start()
     return th

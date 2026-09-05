@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { CheckCircle2, Eye, Loader2, RefreshCw, Send, Layers } from "lucide-react";
+import { AlertTriangle, CheckCircle2, Eye, Loader2, RefreshCw, Send, Layers, Zap } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 
@@ -30,6 +30,13 @@ export default function CloudModulePage() {
   const [pushingAll, setPushingAll] = useState(false);
   const [cacheBuster, setCacheBuster] = useState(0);
   const [log, setLog] = useState<string[]>([]);
+  const [otaState, setOtaState] = useState<{
+    armed: boolean;
+    path: string | null;
+    history: { ts?: number; result?: string; error?: string }[];
+    default_bin: string;
+  } | null>(null);
+  const [otaBusy, setOtaBusy] = useState(false);
 
   const appendLog = useCallback((line: string) => {
     setLog((prev) => [`[${new Date().toLocaleTimeString()}] ${line}`, ...prev].slice(0, 40));
@@ -59,12 +66,26 @@ export default function CloudModulePage() {
     }
   }, []);
 
+  const refreshOta = useCallback(async () => {
+    try {
+      const r = await fetch("/api/cloud-module/ota/status", { cache: "no-store" });
+      const d = await r.json();
+      setOtaState(d);
+    } catch {
+      /* keep last */
+    }
+  }, []);
+
   useEffect(() => {
     refreshModes();
     refreshStatus();
-    const t = setInterval(refreshStatus, 5000);
+    refreshOta();
+    const t = setInterval(() => {
+      refreshStatus();
+      refreshOta();
+    }, 5000);
     return () => clearInterval(t);
-  }, [refreshModes, refreshStatus]);
+  }, [refreshModes, refreshStatus, refreshOta]);
 
   const doPreview = useCallback(async () => {
     if (!selected) return;
@@ -133,6 +154,53 @@ export default function CloudModulePage() {
       refreshStatus();
     }
   }, [modes.length, refreshStatus]);
+
+  const doOtaArm = useCallback(async () => {
+    if (!otaState) return;
+    const path = otaState.default_bin;
+    if (
+      !confirm(
+        `⚠️ 危险操作 ⚠️\n\n即将武装 OTA 刷写:\n  ${path}\n\n设备下次连入 bridge 时, 就会开始推 .bin, 失败/中断 = 设备变砖.\n\n确认要继续?`,
+      )
+    ) {
+      return;
+    }
+    setOtaBusy(true);
+    try {
+      const r = await fetch("/api/cloud-module/ota/arm", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ path }),
+      });
+      const d = await r.json();
+      if (d.armed) {
+        appendLog(`⚠️ OTA ARMED. 设备下次连入就刷 .bin: ${path} (${d.size} bytes)`);
+      } else {
+        appendLog(`ota arm failed: ${d.detail || JSON.stringify(d)}`);
+      }
+      refreshOta();
+    } catch (e) {
+      appendLog(`ota arm failed: ${e}`);
+    } finally {
+      setOtaBusy(false);
+    }
+  }, [otaState, refreshOta]);
+
+  const doOtaCancel = useCallback(async () => {
+    setOtaBusy(true);
+    try {
+      const r = await fetch("/api/cloud-module/ota/cancel", { method: "POST" });
+      const d = await r.json();
+      if (d.armed === false) {
+        appendLog(`ota cancelled`);
+      }
+      refreshOta();
+    } catch (e) {
+      appendLog(`ota cancel failed: ${e}`);
+    } finally {
+      setOtaBusy(false);
+    }
+  }, [refreshOta]);
 
   const selectedMeta = useMemo(
     () => modes.find((m) => m.mode_id === selected),
@@ -240,6 +308,71 @@ export default function CloudModulePage() {
           </CardContent>
         </Card>
       </div>
+
+      <Card>
+        <CardHeader>
+          <CardTitle className="flex items-center gap-2">
+            <Zap size={18} className="text-amber-500" /> OTA 固件升级
+            {otaState?.armed ? (
+              <span className="ml-2 inline-flex items-center gap-1 rounded-sm bg-red-100 text-red-700 px-2 py-0.5 text-[10px] font-semibold">
+                <AlertTriangle size={12} /> ARMED
+              </span>
+            ) : (
+              <span className="ml-2 inline-flex items-center gap-1 rounded-sm bg-ink/5 text-ink-light px-2 py-0.5 text-[10px]">
+                idle
+              </span>
+            )}
+          </CardTitle>
+        </CardHeader>
+        <CardContent className="space-y-3">
+          <div className="text-xs text-ink-light space-y-1">
+            <div>
+              默认固件: <span className="font-mono text-ink/80">{otaState?.default_bin || "..."}</span>
+            </div>
+            {otaState?.armed && (
+              <div className="text-red-700">
+                等待设备连入: <span className="font-mono">{otaState.path}</span>
+              </div>
+            )}
+            {otaState?.history && otaState.history.length > 0 && (
+              <div className="pt-2 border-t border-ink/10">
+                <div className="font-semibold text-ink/80">最近 OTA 记录:</div>
+                {otaState.history.slice(-3).map((h, i) => (
+                  <div key={i} className="font-mono text-[10px]">
+                    {h.ts ? new Date(h.ts * 1000).toLocaleTimeString() : "—"} →{" "}
+                    {h.result || h.error || "?"}
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+          <div className="flex gap-2">
+            {!otaState?.armed ? (
+              <Button
+                onClick={doOtaArm}
+                disabled={!otaState || otaBusy}
+                variant="destructive"
+              >
+                {otaBusy ? <Loader2 className="animate-spin" size={14} /> : <Zap size={14} />}
+                <span className="ml-1">武装 OTA（危险）</span>
+              </Button>
+            ) : (
+              <Button
+                onClick={doOtaCancel}
+                disabled={otaBusy}
+                variant="outline"
+                className="border-red-300 text-red-700 hover:bg-red-50"
+              >
+                取消武装
+              </Button>
+            )}
+          </div>
+          <p className="text-[10px] text-ink-light leading-relaxed">
+            ⚠️ 固件刷写会通过微雪私有协议 <code>;O/</code> 推送 <code>firmware_merged.bin</code>。
+            刷写期间不要断电/关电脑。失败/中断 = 设备变砖, 需用 USB-TTL + esptool 救砖。
+          </p>
+        </CardContent>
+      </Card>
 
       <Card>
         <CardHeader>

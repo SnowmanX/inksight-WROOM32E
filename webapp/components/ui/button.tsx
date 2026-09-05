@@ -1,6 +1,6 @@
 import { ButtonHTMLAttributes, forwardRef } from "react";
 
-type ButtonVariant = "default" | "outline" | "ghost";
+type ButtonVariant = "default" | "outline" | "ghost" | "destructive";
 type ButtonSize = "default" | "sm" | "lg";
 
 interface ButtonProps extends ButtonHTMLAttributes<HTMLButtonElement> {
@@ -15,6 +15,8 @@ const variantStyles: Record<ButtonVariant, string> = {
     "bg-transparent text-ink border border-ink hover:bg-ink hover:text-white",
   ghost:
     "bg-transparent text-ink hover:bg-ink/5 border border-transparent",
+  destructive:
+    "bg-red-600 text-white hover:bg-red-700 border border-red-700 shadow-sm",
 };
 
 const sizeStyles: Record<ButtonSize, string> = {
