@@ -1,140 +1,255 @@
-English | [中文](README_ZH.md)
+# InkSight × Waveshare 4.2" e-Paper Cloud Module
 
-# InkSight
+本仓库 fork 自 [datascale-ai/inksight](https://github.com/datascale-ai/inksight)，新增对**微雪 4.2inch e-Paper Cloud Module**（固件不可下载场景）的服务端下发支持。
 
-> A calm e-ink desk companion with one website for flashing, configuration, preview, and discovering new modes.
+> 上游 InkSight 仓库的原始说明已保留在 [`README.upstream.md`](./README.upstream.md) / [`README_ZH.upstream.md`](./README_ZH.upstream.md)。
+> 协议与架构详解：[`backend/WAVESHARE_README.md`](./backend/WAVESHARE_README.md) · 端到端时序：[`backend/ARCHITECTURE.md`](./backend/ARCHITECTURE.md)
 
-Official website: [https://www.inksight.site](https://www.inksight.site)
+---
 
-![InkSight](images/intro_eng.jpg)
+## 这个项目能做什么
 
-## Why It Stands Out
+把微雪原版"必须用自家 App 配网、必须连微雪云"的 4.2" 墨水屏，改成"用你自己电脑上的网站控制"：
 
-InkSight turns a small e-ink screen into a quiet, always-visible information surface for your desk.
-Instead of another glowing notification feed, it gives you useful, beautiful, and customizable content in a paper-like form.
+- ✅ 选一个模式（如 `DAILY` / `POETRY` / `WEATHER`），网页上**实时预览**会成什么样
+- ✅ 一键推送到墨水屏，**不刷固件、不改硬件**
+- ✅ 内置 **30 个 InkSight 模式**（每日、诗词、天气、AI 简报等）
+- ✅ 可选：**先全白清屏**（消除残影）· **推完即睡**（关 WiFi 省电）· **OTA 升级固件**（高危）
 
-- **Useful at a glance** — weather, countdowns, memos, habits, briefings, and daily prompts
-- **Made for desks** — a paper-like e-ink display that stays visible without adding screen fatigue
-- **Beautiful and varied** — 24 built-in modes, from practical dashboards to more atmospheric content
-- **A one-stop website experience** — beginner-friendly browser flashing, online setup, preview, and mode discovery
-- **Open and extensible** — firmware, backend, web configuration, and the JSON mode system are all designed to be expanded over time, including future hardware design files
+---
 
-## One Website, End to End
+## 与上游 InkSight 的区别
 
-The website brings the whole user flow together in one place.
-Even if you are completely new to e-paper devices, ESP32 boards, or WebSerial, the product is designed so you can get started by following the UI step by step instead of assembling your own toolchain first.
+| 维度 | 原版 InkSight | 本 fork |
+|---|---|---|
+| 目标设备 | ESP32-C3 + 4.2" e-paper（自刷固件） | **微雪 4.2" e-Paper Cloud Module**（固件不可改） |
+| 设备端职责 | 解析 JSON + 渲染 + 刷屏 | 只接收 **预渲染好的 1bpp 位图** + 触发刷屏 |
+| 渲染位置 | ESP32 固件 | **服务端**（InkSight pipeline 在电脑上跑） |
+| 通信协议 | 设备拉 JSON (HTTP) | **Waveshare 私有 TCP 6868 协议** |
 
-- **Flash firmware in the browser** with the Web Flasher, without starting from a local flashing setup
-- **Configure devices online** with modes, preferences, refresh strategy, and per-mode overrides
-- **Preview content before saving** so the final e-ink result is visible in advance
-- **Try it even without a device** through the no-device demo flow
-- **Discover community creations** in the mode plaza, then install and reuse ideas shared by other users
+---
 
-This makes InkSight feel less like a kit with scattered tools and more like a complete product experience.
+## 硬件与网络准备
 
-## Rich Mode Library
+### 你需要准备的东西
 
-InkSight currently ships with **24 built-in modes**, including:
+| 项目 | 说明 |
+|---|---|
+| 微雪 4.2" e-Paper Cloud Module | 1 台，固件为出厂版本（不需要改） |
+| 电脑（Windows / macOS / Linux） | 跑后端 + bridge，IP 在路由器里固定 |
+| Wi-Fi 路由器 | 电脑和设备在**同一个局域网** |
+| 微雪配网 App | iOS / Android，用于第一次把设备配上 Wi-Fi |
 
-- **Daily Picks** — quotes, books, facts, and seasonal context
-- **Weather Dashboard** — live weather with practical advice
-- **Poetry / Zen / Stoic** — calm, reflective content for focused desks
-- **AI Briefing** — technology highlights and AI insights
-- **ArtWall** — black-and-white AI artwork tailored to context
-- **Memo / Countdown / Habit / Fitness** — practical everyday desk utilities
+> 💡 **不知道设备密码？** 出厂默认是 `123456`，本项目全程使用这个默认值。
 
-You can also:
+---
 
-- **create custom modes**
-- **save them to your device**
-- **share them to the mode plaza**
-- **install community-created modes**
+## 安装步骤
 
-## Recommended Hardware
+### 0. 克隆仓库
 
-InkSight is easiest to build with the following setup:
+```bash
+git clone https://github.com/SnowmanX/inksight-waveshare-cloud-module.git
+cd inksight-waveshare-cloud-module
+```
 
-| Part | Recommended choice |
-|------|--------------------|
-| MCU | ESP32-C3 development board |
-| Display | 4.2-inch SPI e-paper display |
-| Power | USB for development, optional lithium battery build (recommended `505060-2000mAh` + TP5000) |
-| Cost | Typical DIY BOM around **CNY 220** |
+### 1. 启动 InkSight 后端（端口 8080）
 
-> **For detailed purchasing schemes and part links**, please refer to the [**Hardware Purchasing Guide**](docs/en/bom.md) (Note: links are mostly for Taobao, but equivalent parts can be found on AliExpress/Amazon).
+```bash
+cd backend
+python -m venv .venv
 
-The public documentation and setup flow are centered on **ESP32-C3 + 4.2-inch e-paper**.
+# Windows
+.venv\Scripts\activate
+# macOS / Linux
+source .venv/bin/activate
 
-For a first build, start with **ESP32-C3 + 4.2-inch e-paper**.
+pip install -r requirements.txt
+cp .env.example .env       # 可选：填 LLM key 以启用 AI 模式
 
-## Explore the Official Website
+uvicorn api.index:app --host 0.0.0.0 --port 8080 --reload
+```
 
-![Official Website](images/official_web_screenshot_eng.png)
+启动后访问 `http://127.0.0.1:8080/docs` 能看到 FastAPI 文档就 OK 了。
 
-If you want to get a feel for the product before buying parts or setting up anything locally, the official website is the best place to start:
+> ⚠️ **不填 LLM key 也能跑**：30 个模式大部分会走 fallback（用占位文字），不是 30 个一模一样。填上 `OPENAI_API_KEY` 或 `DASHSCOPE_API_KEY` 后会走真 pipeline，每个模式内容都不一样。
 
-- **Homepage** — a quick overview of the product and how the experience fits together
-- **Web flasher** — browser-based firmware flashing, with a walkthrough video here: [`Flashing tutorial`](https://www.bilibili.com/video/BV1aWcQzQE3r/?spm_id_from=333.1387.homepage.video_card.click&vd_source=166ea338ef8c38d7904da906b88ef0b7)
-- **Device configuration** — once a device is flashed, this is where you configure what it shows
-- **Mode plaza** — browse community-made creations, publish your own, or install modes shared by other users
-- **No-device demo** — try the experience even if you do not own the hardware yet
+### 2. 启动 Waveshare Bridge（HTTP 9000 + TCP 6868）
 
-## Build the Device
+**新开一个终端**，仍在 `backend/` 目录、激活 venv：
 
-If you enjoy DIY hardware and want to build your own InkSight unit, or if you already have the parts but are not sure how to wire and assemble them, start here:
+```bash
+# Windows PowerShell
+$env:BRIDGE_LOG_FILE = "D:\Hardware\esp32\cloudModule\inksight-waveshare-cloud-module\backend\bridge.log"
+python -m backend.scripts.waveshare_bridge --device-ip 192.168.1.195 --port 9000
 
-![Build the Device](images/build-device.png)
+# macOS / Linux
+BRIDGE_LOG_FILE=./bridge.log python -m backend.scripts.waveshare_bridge --device-ip 192.168.1.195 --port 9000
+```
 
-You can also follow the step-by-step assembly video here: [`Assembly tutorial`](https://www.bilibili.com/video/BV1spwKzUE6N?spm_id_from=333.788.videopod.sections&vd_source=166ea338ef8c38d7904da906b88ef0b7)
+参数说明：
 
-We also provide the matching docs:
+| 参数 | 含义 | 示例 |
+|---|---|---|
+| `--device-ip` | 电脑在局域网内的 IP（**不是设备 IP！**） | `192.168.1.195` |
+| `--port` | Bridge HTTP 控制端口 | `9000` |
 
-- Hardware guide: [`docs/hardware.md`](docs/hardware.md)
-- Assembly guide: [`docs/assembly.md`](docs/assembly.md)
-- Flashing guide: [`docs/flash.md`](docs/flash.md)
-- Configuration guide: [`docs/config.md`](docs/config.md)
+启动成功你会看到：
 
-## Community Showcase
+```
+[waveshare_bridge] INFO: bridge ready, device=192.168.1.195:6868
+[passive v29] listening on 0.0.0.0:6868
+Uvicorn running on http://0.0.0.0:9000
+```
 
-We are thrilled to see the amazing cases and custom PCBs created by the InkSight community! Here are some excellent community contributions:
+**Bridge 同时开两个端口**：
 
-### 3D Printable Cases
-- **[Orange Desktop Case (MakerWorld)](https://makerworld.com/zh/@CANLAY)**
-  
-  <img src="images/community/case1.png" width="400">
+- `0.0.0.0:6868` — TCP 被动监听，**等设备主动连进来**后推图
+- `0.0.0.0:9000` — HTTP 控制端，**供 webapp 调用**（推图 / 预览 / 状态）
 
-- **[Pink/Red Minimalist Cases (MakerWorld)](https://makerworld.com/zh/@CANLAY)**
-  
-  <img src="images/community/case2.png" width="400">
-  <img src="images/community/case3.png" width="400">
+> 📌 `6868` 是微雪私有协议端口，**不是 InkSight 后端**（那是 8080）。两个必须同时跑。
 
-- **[Huawei Nova 14 Color Display Phone Case 3.98-inch 4-Color E-ink Screen](https://makerworld.com.cn/zh/models/2399226-gu-jian-kai-yuan-diy-hua-wei-nova14cai-xian-shou-j#profileId-2744953)**
+### 3. 启动 Webapp（端口 3000）
 
-  <img src="images/community/case4.png" width="400">
+**再开一个终端**，回到仓库根目录：
 
-### Custom PCBs
-- **[InkSight 4.2" Custom Driver Board (OSHWHUB)](https://oshwhub.com/kidstory/4-2)**
-  
-  <img src="images/community/pcb1.png" width="400">
+```bash
+cd webapp
+cp .env.example .env.local      # 默认配置即可
 
-- **[Moyu AI E-ink Screen (Verified)](https://oshwhub.com/qq173972819/project_mqihrlpc)**
-  
-  <img src="images/community/pcb2.png" width="400">
+npm install                     # 首次需要，会装 ~2-3 分钟
+npm run dev
+```
 
-## Self-Host or Develop
+启动成功访问 `http://127.0.0.1:3000/cloud-module` 进入"微雪墨水屏"控制台。
 
-If you are a developer, want to run your own local deployment, or want to go beyond the hosted website and build custom integrations or workflows, start here:
+`.env.local` 默认值（一般不用改）：
 
-- Deployment guide: [`docs/en/deploy.md`](docs/en/deploy.md)
-- 中文部署文档：[`docs/deploy.md`](docs/deploy.md)
-- Architecture: [`docs/en/architecture.md`](docs/en/architecture.md)
-- API: [`docs/en/api.md`](docs/en/api.md)
-- Plugin / extension development: [`docs/en/plugin-dev.md`](docs/en/plugin-dev.md)
+```ini
+WAVESHARE_BRIDGE_BASE=http://127.0.0.1:9000   # 上面 Bridge 的地址
+INKSIGHT_BACKEND_API_BASE=http://127.0.0.1:8080 # InkSight 后端
+```
 
-## Community
+### 4. 让微雪设备连到你的电脑
 
-- Discord: [https://discord.gg/5Ne6D4YNf](https://discord.gg/5Ne6D4YNf)
-- QQ 群: [1026120682](http://qm.qq.com/cgi-bin/qm/qr?_wv=1027&k=kha7gD4FzS3ld_f9bx_TlLIj94Oyoip1&authKey=n4yACMiVaMagSs5HUH5HLw%2BhXdKRFjCDI4rAt7zdVym7yTeXwMxTkWqUjE9jzjXo&noverify=0&group_code=1026120682)
-- BiliBili: [https://www.bilibili.com/video/BV1nSNcziE7q/](https://www.bilibili.com/video/BV1nSNcziE7q/)
+1. 用微雪配网 App 把设备连上你家的 Wi-Fi
+2. App 里把"**目标主机**"设成你电脑的局域网 IP（如 `192.168.1.195`）
+3. "**目标主机端口**"设成 `6868`
+4. 保存
 
-![QQ Group QR Code](images/QQ_EN.jpg)
+设备每隔 ~24 秒会主动连 `192.168.1.195:6868` 一次。Bridge 日志里看到 `device connected: 192.168.1.46:xxxxx` 就说明握手成功。
+
+---
+
+## 跑通后能用 Web 做什么
+
+打开 `http://127.0.0.1:3000/cloud-module`：
+
+| 按钮 / 复选框 | 作用 |
+|---|---|
+| **模式下拉框** | 选 30 个内置模式之一（DAILY / POETRY / WEATHER ...） |
+| **预览** | 在网页上看到墨水屏将要显示的样子（PNG） |
+| **推到设备** | 渲染 → 1bpp → 推到设备。设备下次连入时（约 24 秒内）自动刷屏 |
+| **一键全推** | 把 30 个模式**依次**推到设备，每张约 6 秒（适合一次性看完所有模式） |
+| ☑ **先全屏清白** | 推图前先发一帧全白数据，**消除残影**（多花 ~5s） |
+| ☑ **推完即睡** | 推图后向设备发 `;S/` 让它关 WiFi 省电（屏幕内容保持不变） |
+| **Arm OTA (Dangerous)** | 刷固件。**会改设备固件，慎用！** |
+
+---
+
+## 直接用 HTTP API 调 Bridge
+
+不需要 webapp，`curl` 也能玩：
+
+```bash
+# 查设备状态
+curl http://127.0.0.1:9000/status
+
+# 预览一个模式（返回 PNG）
+curl -o daily.png http://127.0.0.1:9000/preview/DAILY
+
+# 推送一个模式到设备
+curl -X POST http://127.0.0.1:9000/push \
+  -H "Content-Type: application/json" \
+  -d '{"persona": "DAILY", "sleep_after": true, "clear_before": true}'
+
+# 一次推 30 个模式
+curl -X POST http://127.0.0.1:9000/push_all
+
+# 列出所有 30 个模式
+curl http://127.0.0.1:9000/modes
+```
+
+`POST /push` 完整 payload：
+
+```json
+{
+  "persona": "DAILY",       // 必填, 模式名 (DAILY / POETRY / WEATHER ...)
+  "sleep_after": false,     // 可选, 推图后让设备进入 ;S/ 关机
+  "clear_before": false     // 可选, 推图前先发一帧全白清屏 (消残影)
+}
+```
+
+---
+
+## 项目结构
+
+```
+inksight-waveshare-cloud-module/
+├── backend/                          # Python 后端 + InkSight pipeline
+│   ├── api/                          # FastAPI 主入口 (端口 8080)
+│   ├── core/                         # 模式 registry、pipeline、LLM
+│   ├── scripts/
+│   │   ├── waveshare_protocol.py     # 指令/数据/收尾帧构造 + checksum
+│   │   ├── waveshare_passive_server.py  # 6868 被动监听 + 推图 + OTA
+│   │   └── waveshare_bridge.py       # 主入口：渲染 + 1bpp + 推图 + HTTP API
+│   ├── WAVESHARE_README.md           # 协议 & 改造点详解
+│   ├── ARCHITECTURE.md               # 端到端时序图
+│   └── requirements.txt
+├── webapp/                           # Next.js 16 前端
+│   └── app/
+│       ├── cloud-module/             # 微雪墨水屏控制台页面
+│       └── api/cloud-module/[...path]/  # 代理 webapp → bridge
+├── README.upstream.md                # 上游 InkSight 原始 README (英文)
+├── README_ZH.upstream.md             # 上游 InkSight 原始 README (中文)
+└── README.md                         # 你正在读的这份
+```
+
+---
+
+## 常见问题
+
+### 1. 启动时提示 `[WinError 10061] 由于目标计算机积极拒绝，无法连接`
+**正常**。Bridge 在启动时 ping 一次设备，没连上也无所谓——设备会自己每隔 24 秒来连。
+
+### 2. 推了图但屏幕没反应
+看 Bridge 日志有没有 `device connected: 192.168.1.46:xxxxx`。如果完全没有：
+- 检查设备"目标主机 / 端口"是否设对（电脑 IP + 6868）
+- 检查电脑和设备在**同一个 Wi-Fi**
+- 检查电脑防火墙是否放行 6868 端口（**Windows 防火墙最常拦截**）
+
+### 3. 屏幕显示但内容乱码
+99% 是 1bpp 位图 bit 序错了。请看 [`backend/ARCHITECTURE.md`](./backend/ARCHITECTURE.md) 的"调试路径"一节。
+
+### 4. 推图后屏幕没关机（设备还在反复刷）
+确保在 webapp 上**勾选了"推完即睡"**复选框。详见 `backend/WAVESHARE_README.md`。
+
+### 5. 屏幕上"先全屏清白"按钮点了，左上角还是有残影
+可能设备固件版本对"清屏后重新进数据模式"的支持有差异。看 Bridge 日志中 `F/[after-clear]` 响应是否正常（应该是 `2446230000`）。
+
+### 6. 我想自己写模式
+InkSight 的模式是 JSON 描述文件，放在 `backend/core/modes/builtin/*.json`。参考现有的 `daily.json` 写一个新的，**重启 backend** 就会被自动加载。
+
+---
+
+## 致谢
+
+- 原版 InkSight：[datascale-ai/inksight](https://github.com/datascale-ai/inksight)
+- 协议参考：[headblockhead/wavesharecloud](https://github.com/headblockhead/wavesharecloud/blob/master/DISPLAYDOCS.md)
+- 官方 SDK：[Waveshare Cloud Module Wiki](https://www.waveshare.com/wiki/4.2inch_e-Paper_Cloud_Module)
+- 官方 demo 路径：`Cloud_WIN/lib/tcp_server/tcp_sver.py`
+
+## 社区
+
+- Discord: <https://discord.gg/5Ne6D4YNf>
+- BiliBili: <https://www.bilibili.com/video/BV1nSNcziE7q/>
