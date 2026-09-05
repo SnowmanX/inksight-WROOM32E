@@ -52,8 +52,14 @@ echo [3/3] 启动 Webapp (端口 3000)...
 start "InkSight-Webapp" cmd /k "cd /d %WEBAPP_DIR% && npx next dev -p 3000"
 
 echo.
-echo 三个服务已启动, 等待 10-20 秒加载...
+echo 三个服务已启动, 等待 10 秒加载...
 echo 然后浏览器打开: http://127.0.0.1:3000/cloud-module
+echo.
+
+REM 等 10 秒让 next dev 起来, 然后用默认浏览器打开 webapp
+timeout /t 10 /nobreak >nul
+start "" http://127.0.0.1:3000/cloud-module
+
 echo.
 echo 关闭: 直接关掉那 3 个黑色窗口
 pause

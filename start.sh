@@ -70,7 +70,17 @@ WEBAPP_PID=$(pgrep -f "next dev" | tail -n 1)
 echo "      PID=$WEBAPP_PID"
 
 echo
-echo "三个服务已启动, 等待 10-20 秒加载..."
+echo "三个服务已启动, 等待 10 秒加载..."
 echo "然后浏览器打开: http://127.0.0.1:$WEBAPP_PORT/cloud-module"
 echo
 echo "停止所有服务: bash stop.sh"
+
+# 等 10 秒让 next dev 起来, 然后用默认浏览器打开 webapp
+sleep 10
+URL="http://127.0.0.1:$WEBAPP_PORT/cloud-module"
+
+case "$(uname -s)" in
+  Darwin)  open "$URL" ;;
+  Linux)   xdg-open "$URL" >/dev/null 2>&1 || echo "(未找到 xdg-open, 请手动打开 $URL)" ;;
+  *)       echo "(未知系统, 请手动打开 $URL)" ;;
+esac

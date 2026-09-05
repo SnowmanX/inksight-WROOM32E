@@ -55,8 +55,8 @@
 3. 运行：
    - **Windows**：双击 `start.bat`
    - **macOS / Linux**：`bash start.sh`
-4. 会自动弹出 3 个终端窗口（后端 / Bridge / Webapp），等 10-20 秒加载完
-5. 浏览器打开 `http://127.0.0.1:3000/cloud-module`
+4. 会自动弹出 3 个终端窗口（后端 / Bridge / Webapp）和 1 个默认浏览器窗口，等 10-20 秒加载完
+5. 浏览器已经自动打开到 `http://127.0.0.1:3000/cloud-module`，没自动开就手动复制
 6. 关闭时直接关掉那 3 个窗口，或运行 `bash stop.sh`
 
 ### 手动启动（3 个独立终端）
