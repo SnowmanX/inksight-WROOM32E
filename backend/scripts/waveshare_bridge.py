@@ -29,6 +29,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import io
+import json
 import logging
 import os
 import sys
@@ -69,6 +70,171 @@ logging.basicConfig(
 
 
 # ==================== 图像处理：PNG → 1bpp 400x300 ====================
+
+
+def _stub_aliyun_modules() -> None:
+    """猴子补丁: 注入阿里云 SDK 的 stub, 让 InkSight pipeline 在没装 SDK 时也能跑.
+
+    InkSight 顶层 import 的阿里云包:
+      alibabacloud_alimt20181012        (翻译)
+      alibabacloud_alimt20181012.client
+      alibabacloud_alimt20181012.models
+      alibabacloud_tea_openapi          (OpenAPI 通用 SDK, alimt 间接依赖)
+      alibabacloud_tea_openapi.models
+      alibabacloud_tea_openapi.client
+
+    没装的话 json_content.py 加载就崩, 整个 pipeline fallback 到固定文字图,
+    30 个模式之间完全没区别. 我们用 sys.modules 注入 stub, 翻译/SDK 调用都返回原值.
+
+    stub 设计:
+      - Request 构造器: 收任意参数
+      - Client: 实例化不报错, translate_general/任何方法都返回 body.data = None
+        (InkSight 会自己处理 None → 走非翻译分支, 即"原值显示").
+    """
+    import sys
+    import types
+
+    if "alibabacloud_tea_openapi" in sys.modules and "alibabacloud_alimt20181012" in sys.modules:
+        return  # 全部已装
+
+    def _install_pkg(name: str) -> types.ModuleType:
+        if name in sys.modules:
+            return sys.modules[name]
+        mod = types.ModuleType(name)
+        mod.__path__ = []
+        sys.modules[name] = mod
+        return mod
+
+    def _install_response() -> type:
+        class _StubResponse:
+            def __init__(self, *a, **kw):
+                self.body = type("body", (), {"data": None})()
+                self.headers = {}
+                self.status_code = 200
+
+        return _StubResponse
+
+    # === alibabacloud_tea_openapi ===
+    tea = _install_pkg("alibabacloud_tea_openapi")
+    tea_models = _install_pkg("alibabacloud_tea_openapi.models")
+
+    class _TeaModels:
+        class TeaRequest:
+            def __init__(self, *a, **kw):
+                pass
+
+        class TeaModel:
+            def __init__(self, *a, **kw):
+                pass
+
+    for n, v in _TeaModels.__dict__.items():
+        if not n.startswith("_"):
+            setattr(tea_models, n, v)
+
+    tea_client = _install_pkg("alibabacloud_tea_openapi.client")
+
+    class _TeaClient:
+        def __init__(self, *a, **kw):
+            self._cfg = kw
+
+        def call_api(self, *a, **kw):
+            return _install_response()()
+
+        def do_rpc_request(self, *a, **kw):
+            return _install_response()()
+
+    tea_client.Client = _TeaClient
+    setattr(tea, "Client", _TeaClient)
+    setattr(tea, "Tea", _TeaClient)
+    setattr(tea, "TeaCore", _TeaClient)
+
+    # === alibabacloud_alimt20181012 ===
+    alimt = _install_pkg("alibabacloud_alimt20181012")
+    alimt_models = _install_pkg("alibabacloud_alimt20181012.models")
+
+    class _StubRequest:
+        def __init__(self, *a, **kw):
+            self._data = a or kw
+
+    alimt_models.TranslateGeneralRequest = _StubRequest
+    setattr(alimt, "models", alimt_models)
+
+    alimt_client = _install_pkg("alibabacloud_alimt20181012.client")
+
+    class _AlimtClient:
+        def __init__(self, *a, **kw):
+            pass
+
+        def translate_general(self, request, *a, **kw):
+            return _install_response()()
+
+        def translate(self, request, *a, **kw):
+            return _install_response()()
+
+    alimt_client.Client = _AlimtClient
+    setattr(alimt, "Client", _AlimtClient)
+    setattr(alimt, "client", alimt_client)
+
+    # === 常见派生包（如果有 json_content 直接 import 这些，也兜住） ===
+    for n in (
+        "alibabacloud_tea_util",
+        "alibabacloud_tea_util.client",
+        "alibabacloud_tea_openapi.util",
+        "alibabacloud_tea_openapi.endpoint",
+    ):
+        if n not in sys.modules:
+            m = types.ModuleType(n)
+            sys.modules[n] = m
+
+    # === openai SDK（InkSight LLM provider 走 openai 兼容协议） ===
+    if "openai" not in sys.modules:
+        openai_pkg = types.ModuleType("openai")
+        openai_pkg.__path__ = []
+        sys.modules["openai"] = openai_pkg
+
+        class _StubChoice:
+            def __init__(self, *a, **kw):
+                self.message = type("msg", (), {"content": "", "role": "assistant"})()
+
+        class _StubCompletion:
+            def __init__(self, *a, **kw):
+                self.choices = [_StubChoice()]
+                self.usage = type("usage", (), {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0})()
+
+        class _StubChatCompletions:
+            def create(self, *a, **kw):
+                return _StubCompletion()
+
+        class _StubChat:
+            def __init__(self, *a, **kw):
+                self.completions = _StubChatCompletions()
+
+        class _StubOpenAI:
+            def __init__(self, *a, **kw):
+                self.chat = _StubChat()
+
+        class _StubAsyncOpenAI:
+            def __init__(self, *a, **kw):
+                self.chat = _StubChat()
+
+        class _StubAPIError(Exception):
+            pass
+
+        class _StubOpenAIError(_StubAPIError):
+            pass
+
+        openai_pkg.OpenAI = _StubOpenAI
+        openai_pkg.AsyncOpenAI = _StubAsyncOpenAI
+        openai_pkg.APIError = _StubAPIError
+        openai_pkg.OpenAIError = _StubOpenAIError
+        openai_pkg.ChatCompletion = type("ChatCompletion", (), {"create": staticmethod(lambda *a, **kw: _StubCompletion())})
+
+    logger.info("[waveshare_bridge] installed alimt+tea_openapi+openai stubs (real SDKs not available)")
+
+
+# 在模块 import 时立即执行 stub, 必须在 backend import 之前
+_stub_aliyun_modules()
+
 
 def png_bytes_to_1bpp(png_bytes: bytes, *, dither: bool = True) -> bytes:
     """v32 终极修正: 撤销 _reverse_bits_in_byte (它一直是错的).
@@ -191,21 +357,9 @@ def _fallback_render(persona: str, w: int, h: int) -> bytes:
     draw.text((10, 170), "1bpp MSB-first, 0=white, 1=black", fill=0, font=font_small)
 
     # 边框 + 十字线 (容易看清是否对)
-    draw.rectangle((0, 0, w-1, h-1), outline=0)
-    draw.line((0, 0, w-1, h-1), fill=0)
-    draw.line((0, h-1, w-1, 0), fill=0)
-
-    buf = io.BytesIO()
-    img.save(buf, format="PNG", optimize=True)
-    return buf.getvalue()
-    draw.text((20, 70), f"Time: {now.strftime('%Y-%m-%d %H:%M:%S')}", fill=255, font=font_med)
-    draw.text((20, 100), f"Mode: {persona}", fill=255, font=font_med)
-    draw.text((20, 130), f"Device: 192.168.1.46", fill=255, font=font_med)
-    draw.text((20, 160), f"Source: inksight-waveshare-cloud-module", fill=255, font=font_small)
-    draw.text((20, 200), "All systems OK. Bridge alive.", fill=255, font=font_med)
-
-    # 简单边框
-    draw.rectangle((0, 0, w - 1, h - 1), outline=255, width=2)
+    draw.rectangle((0, 0, w - 1, h - 1), outline=0)
+    draw.line((0, 0, w - 1, h - 1), fill=0)
+    draw.line((0, h - 1, w - 1, 0), fill=0)
 
     buf = io.BytesIO()
     img.save(buf, format="PNG", optimize=True)
@@ -342,6 +496,74 @@ def make_app(device: WaveshareDevice) -> FastAPI:
         """返回 400x300 PNG（不下发到设备），用于本地预览。"""
         png = await render_persona_to_png(persona)
         return PlainTextResponse(png.decode("latin1"), media_type="image/png")
+
+    @app.get("/modes")
+    async def modes():
+        """列出所有 InkSight 内置 JSON 模式（30 个）。
+
+        从 backend/core/modes/builtin/*.json 扫描，交给 webapp 渲染下拉框。
+        """
+        import glob
+
+        builtin_dir = os.path.join(BACKEND_DIR, "core", "modes", "builtin")
+        out = []
+        for path in sorted(glob.glob(os.path.join(builtin_dir, "*.json"))):
+            try:
+                with open(path, "r", encoding="utf-8") as f:
+                    d = json.load(f)
+            except Exception:  # noqa: BLE001
+                continue
+            out.append(
+                {
+                    "mode_id": d.get("mode_id", os.path.splitext(os.path.basename(path))[0]).upper(),
+                    "display_name": d.get("display_name", ""),
+                    "icon": d.get("icon", "star"),
+                    "cacheable": d.get("cacheable", True),
+                    "description": d.get("description", ""),
+                    "source": "builtin_json",
+                    "file": os.path.relpath(path, REPO_ROOT).replace(os.sep, "/"),
+                }
+            )
+        return {"count": len(out), "modes": out}
+
+    @app.post("/push_all")
+    async def push_all(payload: Optional[dict] = None):
+        """按顺序把 30 个真实模式全部推一遍（每个 5s 墨水屏刷新）。
+
+        payload: {"delay": 6.0, "personas": ["DAILY", "POETRY", ...] (可选子集)}
+        失败不中断, 返回每条的 ok/err.
+        """
+        delay = float((payload or {}).get("delay", 6.0))
+        personas = (payload or {}).get("personas")
+        if not personas:
+            import glob as _glob
+
+            builtin_dir = os.path.join(BACKEND_DIR, "core", "modes", "builtin")
+            personas = []
+            for p in sorted(_glob.glob(os.path.join(builtin_dir, "*.json"))):
+                try:
+                    with open(p, "r", encoding="utf-8") as f:
+                        d = json.load(f)
+                    personas.append(d.get("mode_id", "").upper())
+                except Exception:  # noqa: BLE001
+                    continue
+            personas = [p for p in personas if p]
+
+        results = []
+        for i, p in enumerate(personas, 1):
+            t0 = time.time()
+            try:
+                r = await bridge.push_persona(p)
+                r["index"] = i
+                r["elapsed_s"] = round(time.time() - t0, 2)
+                results.append(r)
+                logger.info("[push_all] %d/%d %s ok", i, len(personas), p)
+                if i < len(personas):
+                    await asyncio.sleep(delay)
+            except Exception as e:  # noqa: BLE001
+                results.append({"persona": p, "index": i, "ok": False, "error": str(e)})
+                logger.exception("[push_all] %d/%d %s failed", i, len(personas), p)
+        return {"total": len(personas), "results": results}
 
     return app
 

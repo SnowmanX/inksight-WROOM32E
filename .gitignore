@@ -64,6 +64,15 @@ local_settings.py
 db.sqlite3
 db.sqlite3-journal
 
+# waveshare-bridge smoke test artifacts
+logs/mode_smoke*.json
+logs/mode_smoke*.txt
+logs/mode_smoke*.log
+logs/show_stats.py
+backend/inksight.db
+backend/cache.db
+backend/waveshare_bridge.log
+
 # Flask stuff:
 instance/
 .webassets-cache
