@@ -59,11 +59,12 @@ def _read_drain(sock: socket.socket, timeout: float = 1.0) -> str:
     return "".join(c.hex() for c in chunks)
 
 
-def push_image(sock: socket.socket, image_bytes: bytes, password: str = DEFAULT_PASSWORD, sleep_after: bool = False) -> str:
+def push_image(sock: socket.socket, image_bytes: bytes, password: str = DEFAULT_PASSWORD, sleep_after: bool = False, clear_before: bool = False) -> str:
     """v27: 完全模仿官方 Cloud_WIN 流程.
 
     流程: G/ → C/ → N<pw>/ → F/ → sleep 0.1s → 15帧 → closeFrame → D/ → sleep 5s
     可选: sleep_after=True 时, D/ 之后追加 ;S/ (设备关机省电)
+    可选: clear_before=True 时, 先推一帧全白清屏 (消除残影), 再推主图
     """
     if len(image_bytes) != WAVESHARE_42_FRAME_BYTES:
         raise ValueError(f"image must be {WAVESHARE_42_FRAME_BYTES} bytes (got {len(image_bytes)})")
@@ -87,28 +88,21 @@ def push_image(sock: socket.socket, image_bytes: bytes, password: str = DEFAULT_
     log.append(f"F/={_read_drain(sock, 3.0)!r}")
     time.sleep(0.1)  # 官方: time.sleep(0.1) 在 F/ 之后
 
-    # 5) 数据帧 (按真实字节长度, 最后一帧 664 字节)
-    # 15000 = 14*1024 + 664
-    addr = 0
-    frame_no = 0
-    while addr < WAVESHARE_42_FRAME_BYTES:
-        chunk_len = min(1024, WAVESHARE_42_FRAME_BYTES - addr)
-        chunk = image_bytes[addr : addr + chunk_len]
-        num = (frame_no % 4)
-        sock.sendall(build_data(addr, chunk, num=num))
-        log.append(f"frame{frame_no+1}/{15}({num},addr={addr},len={chunk_len})={_read_drain(sock, 3.0)!r}")
-        addr += chunk_len
-        frame_no += 1
+    if clear_before:
+        # 先推一帧全白清屏, 强制 e-paper 做一次全像素 white 循环, 消除 ghosting.
+        # 全白 1bpp = 全 0x00 (MSB-first, 0=白). F/ 之后用同一数据通道再发一遍即可.
+        white_frame = b"\x00" * WAVESHARE_42_FRAME_BYTES
+        log.append("CLEAR_BEFORE: pushing all-white frame to remove ghosting")
+        logger.info("[push] CLEAR_BEFORE: sending all-white frame (15000 bytes 0x00)")
+        clear_log = _send_one_image(sock, white_frame)
+        log.append(f"CLEAR: {clear_log}")
+        # 清屏帧已发完, 需要重新进 F/ 才能发第二张图 (设备协议要求)
+        sock.sendall(build_cmd("F"))
+        log.append(f"F/[after-clear]={_read_drain(sock, 3.0)!r}")
+        time.sleep(0.1)
 
-    # 6) closeFrame (收尾)
-    sock.sendall(build_close_frame())
-    log.append(f"closeFrame={_read_drain(sock, 5.0)!r}")
-
-    # 7) ;D/ 触发刷屏 + sleep 5s 等设备完成
-    sock.sendall(build_cmd("D"))
-    d_resp = _read_drain(sock, 3.0)
-    log.append(f"D/={d_resp!r}")
-    time.sleep(5.0)  # 关键: 等墨水屏全刷 (4-5s)
+    # 5) 数据帧 (按真实字节长度, 最后一帧 664 字节) + close + D/
+    log.append(_send_one_image(sock, image_bytes))
 
     # 8) 可选: ;S/ 让设备关机省电 (刷完才睡, 不会打断刷屏)
     if sleep_after:
@@ -122,6 +116,32 @@ def push_image(sock: socket.socket, image_bytes: bytes, password: str = DEFAULT_
             log.append(f"S/=<send_err:{e}> (device may have already disconnected)")
             logger.warning("[push] ;S/ send failed: %s", e)
 
+    return " | ".join(log)
+
+
+def _send_one_image(sock: socket.socket, image_bytes: bytes) -> str:
+    """发送 15 帧 + closeFrame + ;D/ + 等 5s. 假定 F/ 已发且 sleep 0.1s 已做."""
+    if len(image_bytes) != WAVESHARE_42_FRAME_BYTES:
+        raise ValueError(f"image must be {WAVESHARE_42_FRAME_BYTES} bytes (got {len(image_bytes)})")
+    log = []
+    addr = 0
+    frame_no = 0
+    while addr < WAVESHARE_42_FRAME_BYTES:
+        chunk_len = min(1024, WAVESHARE_42_FRAME_BYTES - addr)
+        chunk = image_bytes[addr : addr + chunk_len]
+        num = (frame_no % 4)
+        sock.sendall(build_data(addr, chunk, num=num))
+        log.append(f"frame{frame_no+1}/{15}({num},addr={addr},len={chunk_len})={_read_drain(sock, 3.0)!r}")
+        addr += chunk_len
+        frame_no += 1
+    # closeFrame
+    sock.sendall(build_close_frame())
+    log.append(f"closeFrame={_read_drain(sock, 5.0)!r}")
+    # ;D/ 触发刷屏
+    sock.sendall(build_cmd("D"))
+    d_resp = _read_drain(sock, 3.0)
+    log.append(f"D/={d_resp!r}")
+    time.sleep(5.0)  # 关键: 等墨水屏全刷 (4-5s)
     return " | ".join(log)
 
 
@@ -260,6 +280,7 @@ def handle_one_connection(
     ota_provider: Optional[Callable[[], Optional[str]]] = None,
     ota_progress_provider: Optional[Callable[[Callable[[dict], None]], None]] = None,
     sleep_provider: Optional[Callable[[], bool]] = None,
+    clear_provider: Optional[Callable[[], bool]] = None,
 ) -> None:
     peer = f"{addr[0]}:{addr[1]}"
     logger.info("[passive] device connected: %s", peer)
@@ -287,18 +308,24 @@ def handle_one_connection(
             logger.exception("[passive] image_provider failed: %s", e)
             return
 
-        # sleep_provider 只对真实设备 IP 触发 (过滤 loopback / 主动推失败的重试连接)
-        # 关键: 先判 real_device 再消费标志, 否则 loopback 连接会先吞掉 sleep_after_push,
-        # 真正设备来时反而拿不到 True, ;S/ 永远发不出.
+        # sleep_provider / clear_provider 只对真实设备 IP 触发 (过滤 loopback / 主动推失败的重试连接)
+        # 关键: 先判 real_device 再消费标志, 否则 loopback 连接会先吞掉一次性标志,
+        # 真正设备来时反而拿不到 True, ;S/ / 清屏永远发不出.
         is_real_device = addr[0] not in ("127.0.0.1", "::1") and addr[0] != sock.getsockname()[0]
-        if is_real_device and sleep_provider:
-            sleep_after = bool(sleep_provider())
-            if sleep_after:
-                logger.info("[passive] real device %s, sleep_provider TRIGGERED -> ;S/ after push", peer)
-        else:
-            sleep_after = False
-        result = push_image(sock, bw, sleep_after=sleep_after)
-        logger.info("[passive v27] %s DONE (sleep_after=%s, real_device=%s): %s", peer, sleep_after, is_real_device, result)
+        sleep_after = False
+        clear_before = False
+        if is_real_device:
+            if sleep_provider:
+                sleep_after = bool(sleep_provider())
+                if sleep_after:
+                    logger.info("[passive] real device %s, sleep_provider TRIGGERED -> ;S/ after push", peer)
+            if clear_provider:
+                clear_before = bool(clear_provider())
+                if clear_before:
+                    logger.info("[passive] real device %s, clear_provider TRIGGERED -> all-white frame before push", peer)
+        result = push_image(sock, bw, sleep_after=sleep_after, clear_before=clear_before)
+        logger.info("[passive v27] %s DONE (sleep_after=%s, clear_before=%s, real_device=%s): %s",
+                    peer, sleep_after, clear_before, is_real_device, result)
     except Exception as e:
         logger.warning("[passive] %s push failed: %s", peer, e)
         logger.exception(e)
@@ -318,6 +345,7 @@ def start_passive_server(
     ota_provider: Optional[Callable[[], Optional[str]]] = None,
     ota_progress_provider: Optional[Callable[[Callable[[dict], None]], None]] = None,
     sleep_provider: Optional[Callable[[], bool]] = None,
+    clear_provider: Optional[Callable[[], bool]] = None,
 ) -> threading.Thread:
     def _serve() -> None:
         srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -335,7 +363,8 @@ def start_passive_server(
                 t = threading.Thread(
                     target=handle_one_connection,
                     args=(conn, addr, image_provider),
-                    kwargs={"ota_provider": ota_provider, "ota_progress_provider": ota_progress_provider, "sleep_provider": sleep_provider},
+                    kwargs={"ota_provider": ota_provider, "ota_progress_provider": ota_progress_provider,
+                            "sleep_provider": sleep_provider, "clear_provider": clear_provider},
                     daemon=True,
                 )
                 t.start()
