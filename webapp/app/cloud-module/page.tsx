@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { AlertTriangle, CheckCircle2, Eye, Loader2, RefreshCw, Send, Layers, Zap } from "lucide-react";
+import { AlertTriangle, CheckCircle2, Eye, Loader2, Moon, RefreshCw, Send, Layers, Zap } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 
@@ -28,6 +28,7 @@ export default function CloudModulePage() {
   const [previewLoading, setPreviewLoading] = useState(false);
   const [pushing, setPushing] = useState(false);
   const [pushingAll, setPushingAll] = useState(false);
+  const [sleepAfter, setSleepAfter] = useState(false);
   const [cacheBuster, setCacheBuster] = useState(0);
   const [log, setLog] = useState<string[]>([]);
   const [otaState, setOtaState] = useState<{
@@ -141,12 +142,13 @@ export default function CloudModulePage() {
       const r = await fetch("/api/cloud-module/push", {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ persona: selected }),
+        body: JSON.stringify({ persona: selected, sleep_after: sleepAfter }),
       });
       const d = await r.json();
       appendLog(
         d.ok
-          ? `push ${selected} ok, bw=${d.bw_len} bytes, queued for next device connect`
+          ? `push ${selected} ok, bw=${d.bw_len} bytes, queued for next device connect` +
+            (d.sleep_after ? " (推完后设备将进入省电模式)" : "")
           : `push ${selected} failed: ${d.error || JSON.stringify(d)}`,
       );
       refreshStatus();
@@ -155,7 +157,7 @@ export default function CloudModulePage() {
     } finally {
       setPushing(false);
     }
-  }, [selected, refreshStatus]);
+  }, [selected, refreshStatus, sleepAfter, appendLog]);
 
   const doPushAll = useCallback(async () => {
     if (!confirm(`依次推送全部 ${modes.length} 个模式到设备？每个之间墨水屏刷 ~6s，大约 ${Math.ceil(modes.length * 6 / 60)} 分钟。`)) return;
@@ -314,6 +316,16 @@ export default function CloudModulePage() {
                 <span className="ml-1">一键全推</span>
               </Button>
             </div>
+            <label className="flex items-center gap-2 text-xs text-ink-light cursor-pointer select-none">
+              <input
+                type="checkbox"
+                checked={sleepAfter}
+                onChange={(e) => setSleepAfter(e.target.checked)}
+                className="h-3.5 w-3.5 rounded-sm border-ink/20 accent-ink"
+              />
+              <Moon size={12} className="text-ink-light" />
+              <span>推完即睡（推图后向设备发 <code className="font-mono text-[10px]">;S/</code> 关机省电，下次设备唤醒时仍会显示本图）</span>
+            </label>
             <div
               className="border border-ink/10 rounded-sm bg-white flex items-center justify-center overflow-hidden"
               style={{ aspectRatio: "4 / 3" }}

@@ -59,10 +59,11 @@ def _read_drain(sock: socket.socket, timeout: float = 1.0) -> str:
     return "".join(c.hex() for c in chunks)
 
 
-def push_image(sock: socket.socket, image_bytes: bytes, password: str = DEFAULT_PASSWORD) -> str:
-    """v27: 完全模仿官方 Cloud_WIN 流程。
+def push_image(sock: socket.socket, image_bytes: bytes, password: str = DEFAULT_PASSWORD, sleep_after: bool = False) -> str:
+    """v27: 完全模仿官方 Cloud_WIN 流程.
 
     流程: G/ → C/ → N<pw>/ → F/ → sleep 0.1s → 15帧 → closeFrame → D/ → sleep 5s
+    可选: sleep_after=True 时, D/ 之后追加 ;S/ (设备关机省电)
     """
     if len(image_bytes) != WAVESHARE_42_FRAME_BYTES:
         raise ValueError(f"image must be {WAVESHARE_42_FRAME_BYTES} bytes (got {len(image_bytes)})")
@@ -108,6 +109,18 @@ def push_image(sock: socket.socket, image_bytes: bytes, password: str = DEFAULT_
     d_resp = _read_drain(sock, 3.0)
     log.append(f"D/={d_resp!r}")
     time.sleep(5.0)  # 关键: 等墨水屏全刷 (4-5s)
+
+    # 8) 可选: ;S/ 让设备关机省电 (刷完才睡, 不会打断刷屏)
+    if sleep_after:
+        try:
+            logger.info("[push] sending ;S/ to %s (sleep_after=True)", sock.getpeername())
+            sock.sendall(build_cmd("S"))
+            s_resp = _read_drain(sock, 3.0)
+            log.append(f"S/={s_resp!r} (sleep after push)")
+            logger.info("[push] ;S/ sent, device_response=%r", s_resp)
+        except OSError as e:
+            log.append(f"S/=<send_err:{e}> (device may have already disconnected)")
+            logger.warning("[push] ;S/ send failed: %s", e)
 
     return " | ".join(log)
 
@@ -246,6 +259,7 @@ def handle_one_connection(
     *,
     ota_provider: Optional[Callable[[], Optional[str]]] = None,
     ota_progress_provider: Optional[Callable[[Callable[[dict], None]], None]] = None,
+    sleep_provider: Optional[Callable[[], bool]] = None,
 ) -> None:
     peer = f"{addr[0]}:{addr[1]}"
     logger.info("[passive] device connected: %s", peer)
@@ -273,8 +287,18 @@ def handle_one_connection(
             logger.exception("[passive] image_provider failed: %s", e)
             return
 
-        result = push_image(sock, bw)
-        logger.info("[passive v27] %s DONE: %s", peer, result)
+        # sleep_provider 只对真实设备 IP 触发 (过滤 loopback / 主动推失败的重试连接)
+        # 关键: 先判 real_device 再消费标志, 否则 loopback 连接会先吞掉 sleep_after_push,
+        # 真正设备来时反而拿不到 True, ;S/ 永远发不出.
+        is_real_device = addr[0] not in ("127.0.0.1", "::1") and addr[0] != sock.getsockname()[0]
+        if is_real_device and sleep_provider:
+            sleep_after = bool(sleep_provider())
+            if sleep_after:
+                logger.info("[passive] real device %s, sleep_provider TRIGGERED -> ;S/ after push", peer)
+        else:
+            sleep_after = False
+        result = push_image(sock, bw, sleep_after=sleep_after)
+        logger.info("[passive v27] %s DONE (sleep_after=%s, real_device=%s): %s", peer, sleep_after, is_real_device, result)
     except Exception as e:
         logger.warning("[passive] %s push failed: %s", peer, e)
         logger.exception(e)
@@ -293,6 +317,7 @@ def start_passive_server(
     stop_event: Optional[threading.Event] = None,
     ota_provider: Optional[Callable[[], Optional[str]]] = None,
     ota_progress_provider: Optional[Callable[[Callable[[dict], None]], None]] = None,
+    sleep_provider: Optional[Callable[[], bool]] = None,
 ) -> threading.Thread:
     def _serve() -> None:
         srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -310,7 +335,7 @@ def start_passive_server(
                 t = threading.Thread(
                     target=handle_one_connection,
                     args=(conn, addr, image_provider),
-                    kwargs={"ota_provider": ota_provider, "ota_progress_provider": ota_progress_provider},
+                    kwargs={"ota_provider": ota_provider, "ota_progress_provider": ota_progress_provider, "sleep_provider": sleep_provider},
                     daemon=True,
                 )
                 t.start()

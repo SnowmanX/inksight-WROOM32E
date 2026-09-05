@@ -64,7 +64,10 @@ logging.basicConfig(
     format="%(asctime)s [%(name)s] %(levelname)s: %(message)s",
     handlers=[
         logging.StreamHandler(),
-        logging.FileHandler(os.environ.get("BRIDGE_LOG_FILE", "waveshare_bridge.log"), encoding="utf-8"),
+        logging.FileHandler(
+            os.environ.get("BRIDGE_LOG_FILE", r"D:\Hardware\esp32\cloudModule\inksight-waveshare-cloud-module\logs\bridge.log"),
+            encoding="utf-8",
+        ),
     ],
 )
 
@@ -377,6 +380,9 @@ class Bridge:
         self.last_push: Optional[dict] = None
         self.latest_bw: Optional[bytes] = None
         self.latest_persona: Optional[str] = None
+        # sleep_after_push: 设 True 时, 下一次推图后追加 ;S/ 让设备关机省电
+        # 每次取出后自动重置为 False (一次性, 类似 ota_armed)
+        self.sleep_after_push: bool = False
         # OTA 状态: armed=True 时, 设备下次连入就推 .bin
         self.ota_armed: bool = False
         self.ota_path: Optional[str] = None
@@ -490,6 +496,14 @@ def make_app(device: WaveshareDevice) -> FastAPI:
         def _ota_progress_writer(d: dict) -> None:
             bridge.ota_progress.update(d)
 
+        def _sleep_provider() -> bool:
+            """每次取后立即消费, 防止持续睡眠."""
+            if bridge.sleep_after_push:
+                bridge.sleep_after_push = False
+                logger.info("[push] sleep_provider TRIGGERED -> will send ;S/ after push")
+                return True
+            return False
+
         start_passive_server(
             host="0.0.0.0",
             port=device.port,
@@ -497,6 +511,7 @@ def make_app(device: WaveshareDevice) -> FastAPI:
             stop_event=stop_event,
             ota_provider=_ota_provider,
             ota_progress_provider=_ota_progress_writer,  # 直接是 Callable[[dict], None]
+            sleep_provider=_sleep_provider,
         )
         logger.info("passive server started on 0.0.0.0:%d", device.port)
         try:
@@ -530,10 +545,14 @@ def make_app(device: WaveshareDevice) -> FastAPI:
         """渲染 + 1bpp + 缓存到内存. 设备下次连进来时被动下发.
 
         active push (尝试主动连设备) 在后台 fire-and-forget, 不阻塞响应.
+
+        payload: {"persona": "DAILY", "sleep_after": true (可选)}
+          sleep_after=true: 推图后让设备进入 ;S/ 关机省电 (一次性, 下次 push 自动重置)
         """
         persona = payload.get("persona")
         if not persona:
             raise HTTPException(400, "persona is required")
+        sleep_after = bool(payload.get("sleep_after", False))
 
         # 1) 同步: 渲染 + 缓存. 这一步必须成功, 否则 persona 不存在 / LLM 炸了.
         t0 = time.time()
@@ -557,6 +576,10 @@ def make_app(device: WaveshareDevice) -> FastAPI:
             "dither_ms": int(t_dither * 1000),
             "ts": time.time(),
         }
+        # 设一次性 sleep 标志: 设备下次连入推完图后追加 ;S/
+        if sleep_after:
+            bridge.sleep_after_push = True
+            logger.info("[push] sleep_after_push ARMED (device will sleep after next push)")
         logger.info("[push] cached %s: png=%d bw=%d render=%dms dither=%dms",
                     persona, len(png_bytes), len(bw), int(t_render * 1000), int(t_dither * 1000))
 
@@ -578,6 +601,7 @@ def make_app(device: WaveshareDevice) -> FastAPI:
             "render_ms": int(t_render * 1000),
             "dither_ms": int(t_dither * 1000),
             "cached": True,
+            "sleep_after": sleep_after,
             "next_push": "device will receive on next TCP connection (passive mode)",
         }
 
