@@ -44,6 +44,52 @@
 
 ---
 
+## 每次开机怎么启动
+
+### 一键启动（推荐）
+
+仓库根目录有现成脚本，**改一个 IP 就能用**：
+
+1. 用文本编辑器打开 `start.bat`（Windows）或 `start.sh`（macOS / Linux）
+2. 把 `DEVICE_HOST=192.168.1.195` 改成**你电脑的局域网 IP**（不确定就 `ipconfig` / `ifconfig` 查）
+3. 运行：
+   - **Windows**：双击 `start.bat`
+   - **macOS / Linux**：`bash start.sh`
+4. 会自动弹出 3 个终端窗口（后端 / Bridge / Webapp），等 10-20 秒加载完
+5. 浏览器打开 `http://127.0.0.1:3000/cloud-module`
+6. 关闭时直接关掉那 3 个窗口，或运行 `bash stop.sh`
+
+### 手动启动（3 个独立终端）
+
+**首次安装**才需要装依赖，之后每次启动只需要跑下面 3 个命令（每个开一个终端）：
+
+**终端 1 — InkSight 后端**（端口 8080）
+
+```bash
+cd backend
+source .venv/bin/activate   # Windows: .venv\Scripts\activate
+uvicorn api.index:app --host 0.0.0.0 --port 8080
+```
+
+**终端 2 — Waveshare Bridge**（HTTP 9000 + TCP 6868）
+
+```bash
+cd backend
+source .venv/bin/activate
+python -m backend.scripts.waveshare_bridge --device-ip 192.168.1.195 --port 9000
+```
+
+> `192.168.1.195` = 你电脑的局域网 IP（**不是设备 IP！**）
+
+**终端 3 — Webapp**（端口 3000）
+
+```bash
+cd webapp
+npm run dev
+```
+
+---
+
 ## 安装步骤
 
 ### 0. 克隆仓库
