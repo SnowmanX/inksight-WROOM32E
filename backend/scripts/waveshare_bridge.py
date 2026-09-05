@@ -482,14 +482,59 @@ def make_app(device: WaveshareDevice) -> FastAPI:
 
     @app.post("/push")
     async def push(payload: dict):
+        """渲染 + 1bpp + 缓存到内存. 设备下次连进来时被动下发.
+
+        active push (尝试主动连设备) 在后台 fire-and-forget, 不阻塞响应.
+        """
         persona = payload.get("persona")
         if not persona:
             raise HTTPException(400, "persona is required")
+
+        # 1) 同步: 渲染 + 缓存. 这一步必须成功, 否则 persona 不存在 / LLM 炸了.
+        t0 = time.time()
         try:
-            return await bridge.push_persona(persona)
+            png_bytes = await render_persona_to_png(persona)
         except Exception as e:  # noqa: BLE001
-            logger.exception("push failed")
-            raise HTTPException(500, f"push failed: {e}")
+            logger.exception("render failed for %s", persona)
+            raise HTTPException(500, f"render failed: {e}")
+
+        t_render = time.time() - t0
+        bw = png_bytes_to_1bpp(png_bytes)
+        t_dither = time.time() - t0 - t_render
+
+        bridge.latest_bw = bw
+        bridge.latest_persona = persona
+        bridge.last_push = {
+            "persona": persona,
+            "png_bytes": len(png_bytes),
+            "bw_bytes": len(bw),
+            "render_ms": int(t_render * 1000),
+            "dither_ms": int(t_dither * 1000),
+            "ts": time.time(),
+        }
+        logger.info("[push] cached %s: png=%d bw=%d render=%dms dither=%dms",
+                    persona, len(png_bytes), len(bw), int(t_render * 1000), int(t_dither * 1000))
+
+        # 2) 异步: 尝试主动推图. 设备不在线就超时, 不影响响应.
+        async def _try_active_push() -> None:
+            try:
+                resp = await asyncio.to_thread(bridge.push_frame, bw)
+                logger.info("[push] active push %s: %s", persona, resp[:120])
+            except Exception as e:  # noqa: BLE001
+                logger.info("[push] active push %s skipped (no device): %s", persona, e)
+
+        asyncio.create_task(_try_active_push())
+
+        return {
+            "ok": True,
+            "persona": persona,
+            "png_bytes": len(png_bytes),
+            "bw_bytes": len(bw),
+            "render_ms": int(t_render * 1000),
+            "dither_ms": int(t_dither * 1000),
+            "cached": True,
+            "next_push": "device will receive on next TCP connection (passive mode)",
+        }
 
     @app.get("/preview/{persona}")
     async def preview(persona: str):
