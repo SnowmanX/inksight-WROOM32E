@@ -28,11 +28,12 @@ export default function CloudModulePage() {
   const [previewLoading, setPreviewLoading] = useState(false);
   const [pushing, setPushing] = useState(false);
   const [pushingAll, setPushingAll] = useState(false);
+  const [cacheBuster, setCacheBuster] = useState(0);
   const [log, setLog] = useState<string[]>([]);
-  const cacheBuster = useRef(0);
 
-  const appendLog = (line: string) =>
+  const appendLog = useCallback((line: string) => {
     setLog((prev) => [`[${new Date().toLocaleTimeString()}] ${line}`, ...prev].slice(0, 40));
+  }, []);
 
   const refreshModes = useCallback(async () => {
     try {
@@ -68,22 +69,27 @@ export default function CloudModulePage() {
   const doPreview = useCallback(async () => {
     if (!selected) return;
     setPreviewLoading(true);
-    cacheBuster.current += 1;
+    const buster = Date.now();
+    setCacheBuster(buster);
+    if (previewUrl) URL.revokeObjectURL(previewUrl);
     setPreviewUrl(null);
     try {
-      const r = await fetch(`/api/cloud-module/preview/${selected}?t=${cacheBuster.current}`, {
+      const r = await fetch(`/api/cloud-module/preview/${selected}?t=${buster}`, {
         cache: "no-store",
+        headers: { "cache-control": "no-cache" },
       });
       if (!r.ok) throw new Error(`HTTP ${r.status}`);
       const blob = await r.blob();
-      setPreviewUrl(URL.createObjectURL(blob));
-      appendLog(`preview ${selected} ok (${blob.size} bytes)`);
+      if (blob.size === 0) throw new Error("empty response");
+      const url = URL.createObjectURL(blob);
+      setPreviewUrl(url);
+      appendLog(`preview ${selected} ok (${blob.size} bytes, ${blob.type || "?"})`);
     } catch (e) {
       appendLog(`preview ${selected} failed: ${e}`);
     } finally {
       setPreviewLoading(false);
     }
-  }, [selected]);
+  }, [selected, previewUrl, appendLog]);
 
   const doPush = useCallback(async () => {
     if (!selected) return;

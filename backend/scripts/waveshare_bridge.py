@@ -46,7 +46,7 @@ REPO_ROOT = os.path.dirname(BACKEND_DIR)
 if REPO_ROOT not in sys.path:
     sys.path.insert(0, REPO_ROOT)
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Response
 from fastapi.responses import PlainTextResponse
 from PIL import Image
 
@@ -540,7 +540,7 @@ def make_app(device: WaveshareDevice) -> FastAPI:
     async def preview(persona: str):
         """返回 400x300 PNG（不下发到设备），用于本地预览。"""
         png = await render_persona_to_png(persona)
-        return PlainTextResponse(png.decode("latin1"), media_type="image/png")
+        return Response(content=png, media_type="image/png")
 
     @app.get("/modes")
     async def modes():
